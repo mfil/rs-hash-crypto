@@ -97,9 +97,114 @@ pub fn ots_key_gen() -> (OTSPubKey, OTSPrivKey) {
     (pub_key, priv_key)
 }
 
+/* Winternitz one-time signatures with parameter w = 8. */
+
+pub struct WOTSPubKey {
+    hashes: [[u8; 32]; 34]
+}
+
+pub struct WOTSPrivKey {
+    used: bool,
+    preimages: [[u8; 32]; 34]
+}
+
+pub struct WOTSig {
+    hashes: [[u8; 32]; 34]
+}
+
+#[inline]
+fn gen_wots_checksum(message_hash: &mut [u8; 34]) {
+    let mut checksum: u16 = 0;
+    for &byte in &message_hash[0..32] {
+        checksum += 256 - (byte as u16);
+    }
+    message_hash[32] = (checksum >> 8) as u8;
+    message_hash[33] = checksum as u8;
+}
+
+#[inline]
+fn iterated_sha256(preimage: &[u8; 32], iterations: u8) -> [u8; 32] {
+    let mut hash: [u8; 32] = [0; 32];
+    hash.copy_from_slice(preimage);
+    for _ in 0..iterations {
+        hash = sha256(&hash);
+    }
+
+    hash
+}
+
+impl WOTSPrivKey {
+    pub fn is_used(&self) -> bool {
+        self.used
+    }
+
+    pub fn sign(&mut self, message: &[u8]) -> Result<WOTSig, &'static str> {
+        if self.used {
+            return Err("I said one-time!");
+        }
+        self.used = true;
+
+        let mut signature = WOTSig {
+            hashes: [[0; 32]; 34]
+        };
+
+        let mut message_hash: [u8; 34] = [0; 34];
+        message_hash[0..32].copy_from_slice(&sha256(message));
+        gen_wots_checksum(&mut message_hash);
+
+        for (byte, preimage, hash) in izip!(message_hash.iter(),
+                                            self.preimages.iter(),
+                                            signature.hashes.iter_mut()) {
+            *hash = iterated_sha256(preimage, 255 - *byte);
+        }
+
+        Ok(signature)
+    }
+}
+
+impl WOTSPubKey {
+    pub fn verify(&self, message: &[u8], signature: &WOTSig) -> bool {
+        let mut output = true;
+
+        let mut message_hash: [u8; 34] = [0; 34];
+        message_hash[0..32].copy_from_slice(&sha256(message));
+        gen_wots_checksum(&mut message_hash);
+
+        for (byte, sig_hash, pub_hash) in izip!(message_hash.iter(),
+                                                signature.hashes.iter(),
+                                                self.hashes.iter()) {
+            let mut test_hash: [u8; 32] = iterated_sha256(sig_hash, *byte);
+            if test_hash != *pub_hash {
+                output = false;
+            }
+        }
+
+        output
+    }
+}
+
+pub fn wots_key_gen() -> (WOTSPubKey, WOTSPrivKey) {
+    let mut rng = OsRng::new().unwrap();
+    let mut priv_key = WOTSPrivKey {
+        used: false,
+        preimages: [[0; 32]; 34]
+    };
+    let mut pub_key = WOTSPubKey {
+        hashes: [[0; 32]; 34]
+    };
+
+    for (preimage, hash) in izip!(priv_key.preimages.iter_mut(),
+                                  pub_key.hashes.iter_mut()) {
+        rng.fill_bytes(preimage);
+        *hash = iterated_sha256(preimage, 255);
+    }
+
+    (pub_key, priv_key)
+}
+
 #[cfg(test)]
 mod test {
-    use one_time_sig::ots_key_gen;
+    use one_time_sig::{ots_key_gen,wots_key_gen};
 
     #[test]
     fn fresh_priv_key_is_unused() {
@@ -149,6 +254,59 @@ mod test {
     fn pub_key_does_not_verify_signature_from_different_key() {
         let (pub_key, _) = ots_key_gen();
         let (_, mut priv_key2) = ots_key_gen();
+        let message = b"foo";
+        let signature = priv_key2.sign(message).unwrap();
+        assert!(! pub_key.verify(message, &signature));
+    }
+
+    #[test]
+    fn fresh_wots_priv_key_is_unused() {
+        let (_, priv_key) = wots_key_gen();
+        assert!(! priv_key.is_used());
+    }
+
+    #[test]
+    fn wots_priv_key_can_sign_once() {
+        let (_, mut priv_key) = wots_key_gen();
+        let result = priv_key.sign(b"foo");
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn wots_priv_key_is_used_after_signing() {
+        let (_, mut priv_key) = wots_key_gen();
+        priv_key.sign(b"foo").unwrap();
+        assert!(priv_key.is_used());
+    }
+
+    #[test]
+    fn used_wots_priv_key_cannot_sign_again() {
+        let (_, mut priv_key) = wots_key_gen();
+        priv_key.sign(b"foo").unwrap();
+        assert!(priv_key.sign(b"foo").is_err())
+    }
+
+    #[test]
+    fn wots_pub_key_verifies_valid_signature() {
+        let (pub_key, mut priv_key) = wots_key_gen();
+        let message = b"foo";
+        let signature = priv_key.sign(message).unwrap();
+        assert!(pub_key.verify(message, &signature));
+    }
+
+    #[test]
+    fn wots_pub_key_does_not_verify_signature_for_different_message() {
+        let (pub_key, mut priv_key) = wots_key_gen();
+        let message1 = b"foo";
+        let message2 = b"bar";
+        let signature = priv_key.sign(message1).unwrap();
+        assert!(! pub_key.verify(message2, &signature));
+    }
+
+    #[test]
+    fn wots_pub_key_does_not_verify_signature_from_different_key() {
+        let (pub_key, _) = wots_key_gen();
+        let (_, mut priv_key2) = wots_key_gen();
         let message = b"foo";
         let signature = priv_key2.sign(message).unwrap();
         assert!(! pub_key.verify(message, &signature));
