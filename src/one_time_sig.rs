@@ -1,3 +1,5 @@
+use super::utils::{gen_pubkey, wots_sign_raw, wots_verify_raw};
+
 use std::iter::Iterator;
 
 use openssl::sha::sha256;
@@ -100,37 +102,16 @@ pub fn ots_key_gen() -> (OTSPubKey, OTSPrivKey) {
 /* Winternitz one-time signatures with parameter w = 8. */
 
 pub struct WOTSPubKey {
-    hashes: [[u8; 32]; 34]
+    key_bytes: [[u8; 32]; 34]
 }
 
 pub struct WOTSPrivKey {
     used: bool,
-    preimages: [[u8; 32]; 34]
+    key_bytes: [[u8; 32]; 34]
 }
 
 pub struct WOTSig {
-    hashes: [[u8; 32]; 34]
-}
-
-#[inline]
-fn gen_wots_checksum(message_hash: &mut [u8; 34]) {
-    let mut checksum: u16 = 0;
-    for &byte in &message_hash[0..32] {
-        checksum += 256 - (byte as u16);
-    }
-    message_hash[32] = (checksum >> 8) as u8;
-    message_hash[33] = checksum as u8;
-}
-
-#[inline]
-fn iterated_sha256(preimage: &[u8; 32], iterations: u8) -> [u8; 32] {
-    let mut hash: [u8; 32] = [0; 32];
-    hash.copy_from_slice(preimage);
-    for _ in 0..iterations {
-        hash = sha256(&hash);
-    }
-
-    hash
+    sig_bytes: [[u8; 32]; 34]
 }
 
 impl WOTSPrivKey {
@@ -145,18 +126,9 @@ impl WOTSPrivKey {
         self.used = true;
 
         let mut signature = WOTSig {
-            hashes: [[0; 32]; 34]
+            sig_bytes: [[0; 32]; 34]
         };
-
-        let mut message_hash: [u8; 34] = [0; 34];
-        message_hash[0..32].copy_from_slice(&sha256(message));
-        gen_wots_checksum(&mut message_hash);
-
-        for (byte, preimage, hash) in izip!(message_hash.iter(),
-                                            self.preimages.iter(),
-                                            signature.hashes.iter_mut()) {
-            *hash = iterated_sha256(preimage, 255 - *byte);
-        }
+        signature.sig_bytes = wots_sign_raw(&self.key_bytes, message);
 
         Ok(signature)
     }
@@ -164,22 +136,7 @@ impl WOTSPrivKey {
 
 impl WOTSPubKey {
     pub fn verify(&self, message: &[u8], signature: &WOTSig) -> bool {
-        let mut output = true;
-
-        let mut message_hash: [u8; 34] = [0; 34];
-        message_hash[0..32].copy_from_slice(&sha256(message));
-        gen_wots_checksum(&mut message_hash);
-
-        for (byte, sig_hash, pub_hash) in izip!(message_hash.iter(),
-                                                signature.hashes.iter(),
-                                                self.hashes.iter()) {
-            let mut test_hash: [u8; 32] = iterated_sha256(sig_hash, *byte);
-            if test_hash != *pub_hash {
-                output = false;
-            }
-        }
-
-        output
+        wots_verify_raw(&self.key_bytes, message, &signature.sig_bytes)
     }
 }
 
@@ -187,17 +144,17 @@ pub fn wots_key_gen() -> (WOTSPubKey, WOTSPrivKey) {
     let mut rng = OsRng::new().unwrap();
     let mut priv_key = WOTSPrivKey {
         used: false,
-        preimages: [[0; 32]; 34]
+        key_bytes: [[0; 32]; 34]
     };
     let mut pub_key = WOTSPubKey {
-        hashes: [[0; 32]; 34]
+        key_bytes: [[0; 32]; 34]
     };
 
-    for (preimage, hash) in izip!(priv_key.preimages.iter_mut(),
-                                  pub_key.hashes.iter_mut()) {
+    for preimage in priv_key.key_bytes.iter_mut() {
         rng.fill_bytes(preimage);
-        *hash = iterated_sha256(preimage, 255);
     }
+
+    pub_key.key_bytes = gen_pubkey(&priv_key.key_bytes);
 
     (pub_key, priv_key)
 }
