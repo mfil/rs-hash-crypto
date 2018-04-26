@@ -7,3 +7,4 @@ extern crate itertools;
 mod utils;
 
 pub mod one_time_sig;
+pub mod merkle_tree;
