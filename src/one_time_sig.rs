@@ -102,16 +102,16 @@ pub fn ots_key_gen() -> (OTSPubKey, OTSPrivKey) {
 /* Winternitz one-time signatures with parameter w = 8. */
 
 pub struct WOTSPubKey {
-    key_bytes: [[u8; 32]; 34]
+    key_bytes: [u8; 32*34]
 }
 
 pub struct WOTSPrivKey {
     used: bool,
-    key_bytes: [[u8; 32]; 34]
+    key_bytes: [u8; 32*34]
 }
 
 pub struct WOTSig {
-    sig_bytes: [[u8; 32]; 34]
+    sig_bytes: [u8; 32*34]
 }
 
 impl WOTSPrivKey {
@@ -126,7 +126,7 @@ impl WOTSPrivKey {
         self.used = true;
 
         let mut signature = WOTSig {
-            sig_bytes: [[0; 32]; 34]
+            sig_bytes: [0; 32*34]
         };
         signature.sig_bytes = wots_sign_raw(&self.key_bytes, message);
 
@@ -144,15 +144,13 @@ pub fn wots_key_gen() -> (WOTSPubKey, WOTSPrivKey) {
     let mut rng = OsRng::new().unwrap();
     let mut priv_key = WOTSPrivKey {
         used: false,
-        key_bytes: [[0; 32]; 34]
+        key_bytes: [0; 32*34]
     };
     let mut pub_key = WOTSPubKey {
-        key_bytes: [[0; 32]; 34]
+        key_bytes: [0; 32*34]
     };
 
-    for preimage in priv_key.key_bytes.iter_mut() {
-        rng.fill_bytes(preimage);
-    }
+    rng.fill_bytes(&mut priv_key.key_bytes);
 
     pub_key.key_bytes = gen_pubkey(&priv_key.key_bytes);
 
