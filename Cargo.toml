@@ -5,10 +5,5 @@ authors = ["Max Fillinger <max@max-fillinger.net>"]
 
 [dependencies]
 itertools = "0.7.0"
+openssl = "0.10.6"
 rand = "0.4.0"
-
-[dependencies.openssl]
-path = "../rust-openssl/openssl"
-
-[dependencies.openssl-sys]
-path = "../rust-openssl/openssl-sys"
