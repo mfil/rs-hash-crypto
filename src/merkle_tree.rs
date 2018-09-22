@@ -4,6 +4,48 @@ use openssl::sha::sha256;
 use rand::Rng;
 use rand::OsRng;
 
+/* Naive implementation of the Merkle Tree signature scheme. */
+
+/* Functions to help use a tree stored as an array.
+ * The root is at index 0, the left child of index i is at 2 * i + 1 and
+ * the right child at 2 * i + 2. */
+
+fn parent_index(index: usize) -> usize {
+    (index - 1)/2
+}
+
+fn lchild_index(index: usize) -> usize {
+    2 * index + 1
+}
+
+fn rchild_index(index: usize) -> usize {
+    2 * index + 2
+}
+
+fn sibling_index(index: usize) -> usize {
+    if index % 2 == 0 {
+        index - 1
+    }
+    else {
+        index + 1
+    }
+}
+
+fn position_of_index(index: usize) -> NodePosition {
+    if index % 2 == 0 {
+        NodePosition::Right
+    }
+    else {
+        NodePosition::Left
+    }
+}
+
+fn leaf_node_index(number: usize, tree_height: u32) -> usize {
+    let leaves_start = 2usize.pow(tree_height) - 1;
+
+    leaves_start + number
+}
+
 pub struct MTPubKey {
     hash: [u8; 32]
 }
@@ -13,64 +55,17 @@ pub struct MTPrivKey {
     max_uses: u32,
     height: u32,
     seed: [u8; 32],
-    auth_path: Vec<Node>,
-    stacks: Vec<Option<Stack>>,
+    tree: Vec<[u8; 32]>,
 }
 
-struct Stack {
-    height: u32,
-    start_index: u32,
-    index: u32,
-    nodes: Vec<Node>,
+enum NodePosition {
+    Left,
+    Right
 }
 
 struct Node {
-    height: u32,
+    position: NodePosition,
     value: [u8; 32],
-}
-
-impl Stack {
-    fn is_complete(&self) -> bool {
-        if let Some(first_node) = self.nodes.first() {
-            first_node.height == self.height
-        }
-        else {
-            false
-        }
-    }
-
-    fn needs_push(&self) -> bool {
-        let size = self.nodes.len();
-        if size > 2 {
-            self.nodes[size - 1].height != self.nodes[size - 2].height
-        }
-        else {
-            true
-        }
-    }
-
-    fn push(&mut self, node: Node) {
-        self.nodes.push(node);
-        self.index += 1;
-    }
-
-    fn hash(&mut self) {
-        let mut to_hash: [u8; 64] = [0; 64];
-        let node = self.nodes.pop().unwrap();
-        to_hash[32..64].copy_from_slice(&node.value);
-
-        let node = self.nodes.pop().unwrap();
-        to_hash[0..32].copy_from_slice(&node.value);
-
-        self.nodes.push(Node {
-            height: node.height,
-            value: sha256(&to_hash),
-        });
-    }
-
-    fn pop(&mut self) -> Node {
-        self.nodes.pop().unwrap()
-    }
 }
 
 pub struct MTSignature {
@@ -81,8 +76,27 @@ pub struct MTSignature {
 
 impl MTPubKey {
     pub fn verify(&self, message: &[u8], signature: &MTSignature) -> bool {
-        wots_verify_raw(&signature.wots_pubkey, message,
-                &signature.wots_signature)
+        /* First, verify the authentication path. */
+
+        let mut hash = sha256(&signature.wots_pubkey);
+        let mut buffer = [0u8; 64];
+        for node in &signature.auth_path {
+            match &node.position {
+                NodePosition::Left  => {
+                    buffer[0..32].copy_from_slice(&node.value);
+                    buffer[32..64].copy_from_slice(&hash);
+                },
+                NodePosition::Right => {
+                    buffer[0..32].copy_from_slice(&hash);
+                    buffer[32..64].copy_from_slice(&node.value);
+                },
+            }
+
+            hash = sha256(&buffer);
+        }
+
+        hash == self.hash && wots_verify_raw(&signature.wots_pubkey, message,
+                                             &signature.wots_signature)
     }
 }
 
@@ -113,38 +127,40 @@ impl MTPrivKey {
             return Err("This key can not be used anymore.");
         }
 
-        let wots_privkey = self.get_wots_key(self.uses);
+        let wots_privkey = self.get_next_wots_key();
+        let mut index = leaf_node_index(self.uses as usize, self.height);
         self.register_use();
+
+        let mut auth_path = Vec::<Node>::with_capacity(self.height as usize);
+
+        while index > 0 {
+            let sibling = sibling_index(index);
+            auth_path.push(Node {
+                position: position_of_index(sibling),
+                value: self.tree[sibling]
+            });
+
+            /* Move to the parent node. */
+
+            index = parent_index(index);
+        }
 
         Ok(MTSignature {
             wots_pubkey: gen_pubkey(&wots_privkey),
             wots_signature: wots_sign_raw(&wots_privkey, message),
-            auth_path: Vec::new(),
+            auth_path: auth_path,
         })
     }
 
-    fn get_wots_key(&self, key_index: u32) -> [u8; 32*34] {
-
-        /* The WOTS keys are generated in a forward-secure manner, so
-         * we cannot produce a previous key. */
-
-        if key_index < self.uses {
-            panic!("MTPrivKey cannot generate previously used WOTS keys.");
-        }
-
+    fn get_next_wots_key(&self) -> [u8; 32*34] {
         /* The seed for the ith WOTS key is sha256(seed_{i-1} || 00000000).
          * The WOTS key is generated from its seed as
          * sha256(seed_i || 00000001), sha256(seed_i || 00000002), ... */
 
         let mut buffer: [u8; 33] = [0; 33];
         buffer[0..32].copy_from_slice(&self.seed);
-
-        for _ in self.uses..key_index {
-            let next_key_seed = sha256(&buffer);
-            buffer[0..32].copy_from_slice(&next_key_seed);
-        }
-
         let mut wots_key: [u8; 32*34] = [0; 32*34];
+
         for i in 0..34 {
             buffer[32] += 1;
             wots_key[32*i..32*(i+1)].copy_from_slice(&sha256(&buffer));
@@ -153,80 +169,25 @@ impl MTPrivKey {
         wots_key
     }
 
-    fn get_leaf_node(&self, node_index: u32) -> Node {
-        Node {
-            height: 0,
-            value: sha256(&self.get_wots_key(node_index)),
-        }
-    }
+    fn get_all_wots_keys(&self) -> Vec<[u8; 32*34]> {
+        let mut wots_keys = vec![[0u8; 32*34]; self.max_uses as usize];
 
-    fn stack_init(&mut self, height: u32, start_index: u32) {
-        self.stacks[height as usize] = Some(Stack {
-            height: height,
-            start_index: start_index,
-            index: start_index,
-            nodes: Vec::new(),
-        });
-    }
+        let mut buffer: [u8; 33] = [0; 33];
+        buffer[0..32].copy_from_slice(&self.seed);
 
-    fn stack_update(&mut self, height: u32, num_updates: u32) {
-        if let Some(mut stack) = self.stacks[height as usize].take() {
-            let mut update_count = 0;
-
-            while !stack.is_complete() && update_count < num_updates {
-                if stack.needs_push() {
-                    let leaf = self.get_leaf_node(stack.index);
-                    stack.push(leaf);
-                }
-                else {
-                    stack.hash();
-                }
+        for i in 0..(self.max_uses as usize) {
+            buffer[32] = 0;
+            for j in 0..34 {
+                buffer[32] += 1;
+                wots_keys[i][32*j..32*(j+1)].copy_from_slice(&sha256(&buffer))
             }
-        }
-    }
 
-    fn tree_hash(&self) -> [u8; 32] {
-
-        /* We can only calculate the tree hash when no keys have been
-         * used yet. */
-
-        if self.uses > 0 {
-            panic!("Cannot generate the tree hash after the first use.");
+            buffer[32] = 0;
+            let next_seed = sha256(&buffer);
+            buffer[0..32].copy_from_slice(&next_seed);
         }
 
-        /* Initialize the stack with the first two leaf nodes. */
-
-        let mut stack = Vec::<Node>::new();
-        stack.push(self.get_leaf_node(0));
-        stack.push(self.get_leaf_node(1));
-        let mut node_index = 2;
-
-        while stack[0].height < self.height {
-            
-            /* If the last two elements of the stack have the same
-             * height, hash them together. Otherwise, add another leaf
-             * node. */
-
-            let size = stack.len();
-            if size > 1 && stack[size - 1].height == stack[size - 2].height {
-                let last_node = stack.pop().unwrap();
-                let second_to_last_node = stack.pop().unwrap();
-
-                let mut hash_buffer: [u8; 64] = [0; 64];
-                hash_buffer[0..32].copy_from_slice(&second_to_last_node.value);
-                hash_buffer[32..64].copy_from_slice(&last_node.value);
-                stack.push(Node {
-                    height: last_node.height + 1,
-                    value: sha256(&hash_buffer),
-                });
-            }
-            else {
-                stack.push(self.get_leaf_node(node_index));
-                node_index += 1;
-            }
-        }
-
-        stack[0].value
+        wots_keys
     }
 }
 
@@ -241,20 +202,45 @@ pub fn mt_key_gen(max_uses: u32) -> (MTPubKey, MTPrivKey) {
         height += 1;
     }
 
+    let tree_size: usize = 2usize.pow(height + 1) - 1;
+
     let mut priv_key = MTPrivKey {
         uses: 0,
         max_uses: actual_max_uses,
         height: height,
         seed: [0; 32],
-        auth_path: Vec::with_capacity(height as usize),
-        stacks: Vec::with_capacity(height as usize),
+        tree: vec![[0; 32]; tree_size]
     };
 
     let mut rng = OsRng::new().unwrap();
     rng.fill_bytes(&mut priv_key.seed);
 
+    /* Calculate the full tree. Inefficient, but I want to get the naive
+     * implementation to work before moving to more complicated stuff. */
+
+    /* Fill in the leaf nodes. */
+
+    let wots_keys = priv_key.get_all_wots_keys();
+
+    for (i, key) in wots_keys.iter().enumerate() {
+        let pubkey = gen_pubkey(key);
+        let key_hash = sha256(&pubkey);
+        priv_key.tree[leaf_node_index(i, height)].copy_from_slice(&key_hash);
+    }
+
+    /* Go backwards through the rest of the tree. */
+
+    let mut buffer = [0u8; 64];
+    for i in (0..leaf_node_index(0, height)).rev() {
+        let lchild = lchild_index(i);
+        let rchild = rchild_index(i);
+        buffer[0..32].copy_from_slice(&priv_key.tree[lchild]);
+        buffer[32..64].copy_from_slice(&priv_key.tree[rchild]);
+        priv_key.tree[i].copy_from_slice(&sha256(&buffer));
+    }
+
     let pub_key = MTPubKey {
-        hash: priv_key.tree_hash(),
+        hash: priv_key.tree[0]
     };
 
     (pub_key, priv_key)

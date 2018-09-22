@@ -5,5 +5,5 @@ authors = ["Max Fillinger <max@max-fillinger.net>"]
 
 [dependencies]
 itertools = "0.7.0"
-openssl = "0.10.6"
+openssl = "0.10.12"
 rand = "0.4.0"
