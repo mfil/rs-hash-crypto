@@ -6,6 +6,26 @@ use rand::OsRng;
 
 /* Naive implementation of the Merkle Tree signature scheme. */
 
+/* The Merkle Tree scheme works as follows: When creating a key, select
+ * a number of uses and create that many one-time signature keypairs.
+ * Then, build a hash tree as follows: The leaf nodes are hashes of the
+ * one-time public keys. A parent is the hash of its two children. The
+ * hash at the root of the tree is the public key of the Merkle Tree
+ * scheme.
+ *
+ * To sign a message, pick the next unused one-time key pair. The
+ * signature consists of the one-time public key, the one-time signature
+ * on the message, and an "authentication path" that contains the
+ * sibling of the leaf node corresponding to the one-time key, the
+ * sibling of its parent, the sibling of its parent's parent, etc.
+ *
+ * To verify a signature, check two things. If the authentication path
+ * was created honestly, it should allow to recompute the root node of
+ * the hash tree. The public key of the Merkle Tree scheme contains the
+ * actual root. Check that these two values are equal. Then, use the
+ * one-time public key to check that the one-time signature is valid.
+ * If the signature passes these two checks, it is valid. */
+
 /* Functions to help use a tree stored as an array.
  * The root is at index 0, the left child of index i is at 2 * i + 1 and
  * the right child at 2 * i + 2. */
